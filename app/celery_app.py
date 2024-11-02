@@ -3,7 +3,9 @@ from celery import Celery
 from celery.signals import worker_process_init, worker_init
 
 
-celery_app = Celery('app', broker='redis://localhost:6379/0')
+celery_app = Celery("app",
+             broker="redis://localhost:6379/1",  # Your Redis broker URL
+             backend="redis://localhost:6379/1")
 
 
 WORKER_NAME: str = None

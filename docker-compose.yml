@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  fastapi-app:
+    build: .
+    ports:
+      - "5000:5000"
+      - "5555:5555"  # Flower dashboard
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - CUDA_VISIBLE_DEVICES=1
+    depends_on:
+      - redis
+
+  redis:
+    image: "redis:6.0-alpine"
+    ports:
+           - "6380:6379"
