@@ -28,7 +28,7 @@ from uuid import uuid1
 
 
 @app.post("/transcribe/")
-async def transcribe(file: UploadFile = File(...), langue: str = None):
+async def transcribe(file: UploadFile = File(...), langue: str = None,num_speakers:int=None, min_speakers:int=None, max_speakers:int=None):
     try:
         # Generate unique file path
         save_path = os.path.join(UPLOAD_DIR, f"{str(uuid1())}_{file.filename}")
@@ -39,17 +39,19 @@ async def transcribe(file: UploadFile = File(...), langue: str = None):
         print(f"File saved to path: {save_path}")
 
         # Trigger transcription task
-        task = run_transcription_task.delay(save_path, langue)
+        task = run_transcription_task.delay(save_path, langue,num_speakers, min_speakers, max_speakers)
 
         # Return the task ID for tracking
         return {"task_id": task.id, "message": "Transcription started"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
     """
-    Récupère le statut actuel de la tâche, y compris l'étape et d'autres métadonnées pertinentes.
+    Retrieve the current status of the task, including the start and end times, if available.
     """
     task_result = AsyncResult(task_id)
 
@@ -58,7 +60,7 @@ async def get_status(task_id: str):
         "task_id": task_id,
         "status": task_result.state,
         "result": task_result.result if task_result.state == "SUCCESS" else None,  # Include result if task is completed
-        "date_created": datetime.utcnow().isoformat(),  # Metadata example: current timestamp in UTC
+        "date_created": datetime.utcnow().isoformat(),
         "meta": task_result.info if task_result.state == "PROGRESS" else None  # Custom metadata for progress tracking
     }
 

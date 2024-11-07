@@ -1,34 +1,37 @@
 # Importations nécessaires
 import multiprocessing as mp
-import time
+from time import time
 from app.celery_app import celery_app
-
 import torch
 import json
 import gc
 from celery import shared_task
 from celery.signals import worker_process_init
 import os
-from whisperx import align,assign_word_speakers, load_audio, load_model, load_align_model, DiarizationPipeline
 
+from speechbrain.utils.edit_distance import alignment
+
+#from pyannote.audio.models.embedding.wespeaker.convert import duration
+
+from whisperx import align,assign_word_speakers, load_audio, load_model, load_align_model, DiarizationPipeline
+from datetime import datetime
 
 
 model, align_model, metadata, diarize_model = None, None, None, None
-def init():
+from celery.signals import worker_process_init
+
+
+def init(*args, **kwargs):
     try:
-       mp.set_start_method('spawn', force=True)
-       print("spawned")
+        mp.set_start_method('spawn', force=True)
+        print("spawned")
     except RuntimeError:
         print('not spawned')
-    pass
     global model, align_model, metadata, diarize_model
-    def import_models():
-        from app.model import model, align_model, metadata, diarize_model
-        return model, align_model, metadata, diarize_model
+    # Initialisation directe des modèles sans fonction imbriquée
+    from app.model import model, align_model, metadata, diarize_model
 
-    model, align_model, metadata, diarize_model = import_models()
-
-from celery.signals import celeryd_init
+from celery.signals import celeryd_init,worker_shutdown
 
 
 @celeryd_init.connect
@@ -39,6 +42,8 @@ device = "cuda"
 batch_size = 8
 compute_type = "float16"
 output_file = "transcription_result.json"
+from threading import Thread
+
 
 def transcribe_audio(audio, batch_size,langue):
     """Transcrit l'audio avec le modèle Whisper préchargé."""
@@ -50,9 +55,10 @@ def align_segments(segments, audio):
     """Aligne les segments avec le modèle d'alignement."""
     return align(segments, align_model, metadata, audio, device, return_char_alignments=False)
 
-def assign_speaker_labels(audio, aligned_result):
+def assign_speaker_labels(audio, aligned_result,num_speakers, min_speakers, max_speakers):
     """Assigne les étiquettes de locuteur au résultat."""
-    diarize_segments = diarize_model(audio)
+    print(num_speakers)
+    diarize_segments = diarize_model(audio, num_speakers=None, min_speakers=None, max_speakers=None)
     return assign_word_speakers(diarize_segments, aligned_result)
 
 def clear_gpu_cache():
@@ -61,10 +67,12 @@ def clear_gpu_cache():
     torch.cuda.empty_cache()
 
 def save_to_json(result, output_path):
-    """Sauvegarde le résultat de transcription en JSON."""
-    with open(output_path, "w") as f:
-        json.dump(result, f, ensure_ascii=False, indent=4)
-    print(f"Transcription sauvegardée dans {output_path}")
+    #%%
+    with open('resultat.txt', 'w', encoding='utf-8') as f:
+        for discussion in result:
+            text =f"{discussion['speaker']}: {discussion['text']}\n"
+            f.write(text)
+    print(f"Transcription sauvegardée ")
 
 import pandas as pd
 def merge(df):
@@ -107,31 +115,43 @@ def getConversations(data):
     df = pd.DataFrame(words)
     return merge(df)
 
-@shared_task(bind=True)
-def run_transcription_task(self, audio_file,langue):
-    global model, align_model, metadata, diarize_model
+from threading import Lock
 
+transcribe_locker = Lock()
+alignment_locker=Lock()
+diarize_locker=Lock()
+save_locker=Lock()
+
+@shared_task(bind=True)
+def run_transcription_task(self, audio_file,langue,num_speakers, min_speakers, max_speakers):
+    global model, align_model, metadata, diarize_model
+    start = time()
     audio = load_audio(audio_file)
     try:
         # Étape 1 : Transcription
-        self.update_state(state='PROGRESS', meta={'status': 'Transcription en cours'})
-        print(langue)
-        result = transcribe_audio(audio, batch_size,langue)
+        with transcribe_locker:
+
+            self.update_state(state='PROGRESS', meta={'status': 'Transcription en cours'})
+            result = transcribe_audio(audio, batch_size,langue)
 
         # Étape 2 : Alignement
-        self.update_state(state='PROGRESS', meta={'status': 'Alignement des segments'})
-        result = align_segments(result["segments"], audio)
+        with alignment_locker:
+
+            self.update_state(state='PROGRESS', meta={'status': 'Alignement des segments'})
+            result = align_segments(result["segments"], audio)
 
         # Étape 3 : Attribution des étiquettes de locuteur
-        self.update_state(state='PROGRESS', meta={'status': 'Attribution des étiquettes de locuteur'})
-        result = assign_speaker_labels(audio, result)
+        with diarize_locker:
+            self.update_state(state='PROGRESS', meta={'status': 'Attribution des étiquettes de locuteur'})
+            result = assign_speaker_labels(audio, result,num_speakers, min_speakers, max_speakers)
 
         # Sauvegarde du résultat
-        self.update_state(state='PROGRESS', meta={'status': 'Sauvegarde en JSON'})
-        conversation = getConversations(result["segments"])
-        save_to_json(conversation, output_file)
-
-        self.update_state(state='FINISHED', meta={'status': 'Fin de traitement'})
+        with save_locker:
+                self.update_state(state='PROGRESS', meta={'status': 'Sauvegarde en JSON'})
+              #  conversation = getConversations(©©ÂÂ)
+                save_to_json(result["segments"], output_file)
+                end = time()
+                self.update_state(state='FINISHED', meta={'status': 'Fin de traitement','start':start,'end':end})
     except torch.cuda.OutOfMemoryError:
         print("Erreur : mémoire GPU insuffisante.")
         raise Exception("La mémoire GPU est insuffisante pour le traitement.")
@@ -146,7 +166,14 @@ def run_transcription_task(self, audio_file,langue):
         gc.collect()
         if os.path.exists(audio_file):
             os.remove(audio_file)
+    end = time()
+    duration=end-start
+    return {"statut":"transcripted ","start":start,"end":end,"duration":duration}
 
-    return f"Transcription sauvegardée dans {output_file}"
+
+
+
+
+
 
 

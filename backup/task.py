@@ -9,6 +9,9 @@ import gc
 from celery import shared_task
 from celery.signals import worker_process_init
 import os
+
+from kheops_endpoint.transcript.app.task import transcribe_locker
+
 # Configuration
 device = "cuda"
 batch_size = 8
@@ -16,6 +19,11 @@ compute_type = "float16"
 output_file = "transcription_result.json"
 
 model, align_model, metadata, diarize_model = None, None, None, None
+from threading import Lock
+
+transcribe_locker = Lock()
+align_locker = Lock()
+dierize_locker = Lock()
 
 @worker_process_init.connect
 def initialize_models(**kwargs):
@@ -61,17 +69,19 @@ def run_transcription_task(self, audio_file):
 
     audio = whisperx.load_audio(audio_file)
     try:
+        with transcribe_locker:
         # Étape 1 : Transcription
-        self.update_state(state='PROGRESS', meta={'status': 'Transcription en cours'})
-        result = transcribe_audio(audio, batch_size)
+                self.update_state(state='PROGRESS', meta={'status': 'Transcription en cours'})
+                result = transcribe_audio(audio, batch_size)
+        with align_locker:
 
-        # Étape 2 : Alignement
-        self.update_state(state='PROGRESS', meta={'status': 'Alignement des segments'})
-        result = align_segments(result["segments"], audio)
-
+            # Étape 2 : Alignement
+            self.update_state(state='PROGRESS', meta={'status': 'Alignement des segments'})
+            result = align_segments(result["segments"], audio)
+        with dierize_locker:
         # Étape 3 : Attribution des étiquettes de locuteur
-        self.update_state(state='PROGRESS', meta={'status': 'Attribution des étiquettes de locuteur'})
-        result = assign_speaker_labels(audio, result)
+            self.update_state(state='PROGRESS', meta={'status': 'Attribution des étiquettes de locuteur'})
+            result = assign_speaker_labels(audio, result)
 
         # Sauvegarde du résultat
         self.update_state(state='PROGRESS', meta={'status': 'Sauvegarde en JSON'})
